@@ -83,6 +83,14 @@ python examples/heuristic_rollout.py
 
 ## Run Tests
 
+Install test dependency:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Then run:
+
 ```bash
 pytest
 ```
