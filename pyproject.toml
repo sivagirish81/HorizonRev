@@ -13,7 +13,7 @@ authors = [
   { name = "HorizonRev Contributors" }
 ]
 dependencies = [
-  "openenv==0.2.1",
+  "openenv-core==0.2.1",
   "numpy",
 ]
 keywords = ["reinforcement-learning", "environment", "openenv", "revenue", "simulation"]

@@ -28,7 +28,7 @@ pip install -e .
 
 Core dependencies are pinned in `requirements.txt`:
 
-- `openenv==0.2.1`
+- `openenv-core==0.2.1` (OpenEnv stable 0.2.1 runtime distribution)
 - `numpy`
 
 ## Reusability
