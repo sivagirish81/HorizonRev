@@ -1,6 +1,6 @@
 # HorizonRev
 
-HorizonRev is a lightweight, reusable reinforcement learning environment for long-horizon revenue strategy design. An agent makes monthly go-to-market decisions across six months while handling delayed churn effects and a mid-episode market drift event.
+HorizonRev is a lightweight, reusable reinforcement learning environment for long-horizon revenue strategy design. An agent makes monthly go-to-market decisions across 12 months while handling delayed churn effects and a mid-episode market drift event.
 
 Project capabilities:
 
@@ -17,9 +17,9 @@ Most short-horizon simulators optimize immediate conversion. HorizonRev introduc
 
 - increasing discounts improves immediate conversion but schedules future churn penalties
 - investing in onboarding reduces future churn after a delay
-- at month 3, market drift changes SMB and ENT sensitivities
+- around mid-year, market drift changes SMB and ENT sensitivities
 
-This creates a compact but meaningful long-horizon optimization task in only 6 steps.
+This creates a compact but meaningful long-horizon optimization task in 12 steps.
 
 ## Installation
 
@@ -56,7 +56,7 @@ Reward mode options:
 
 ## Environment Spec
 
-- **Episode length:** 6 steps (months 1..6)
+- **Episode length:** 12 steps (months 1..12)
 - **Action space:** discrete(8)
   - `0 NOOP`
   - `1 INCREASE_DISCOUNT`

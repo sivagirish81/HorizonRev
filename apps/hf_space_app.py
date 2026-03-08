@@ -40,6 +40,9 @@ DEFAULT_TRL_MODEL_NAME = "sshleifer/tiny-gpt2"
 DEFAULT_TRL_POLICY_PATH = Path("horizonrev_trl_policy.pt")
 POLICY_METADATA_CANDIDATES = [Path("artifacts/policy_metadata.json"), Path("policy_metadata.json")]
 MLP_POLICY_CANDIDATES = [Path("trained_policy_mlp.npz"), Path("artifacts/trained_policy_mlp.npz")]
+DEFAULT_EPISODE_LENGTH = HorizonRevConfig.default().episode_length
+PRIMITIVE_ACTION_COUNT = len(ACTION_NAMES)
+ACTION_COUNT = PRIMITIVE_ACTION_COUNT + PRIMITIVE_ACTION_COUNT ** HorizonRevConfig.default().actions_per_month
 
 
 def _obs_to_text(obs: np.ndarray) -> str:
@@ -132,9 +135,11 @@ def _maybe_load_mlp_policy():
             b2 = np.asarray(data["b2"], dtype=np.float32)
             if w1.ndim != 2 or b1.ndim != 1 or w2.ndim != 2 or b2.ndim != 1:
                 continue
-            if w1.shape[0] != 12 or w2.shape[1] != 8 or w1.shape[1] != b1.shape[0] or w2.shape[0] != b1.shape[0]:
+            if w1.shape[0] != 12 or w1.shape[1] != b1.shape[0] or w2.shape[0] != b1.shape[0]:
                 continue
-            if b2.shape[0] != 8:
+            if w2.shape[1] != b2.shape[0]:
+                continue
+            if b2.shape[0] < PRIMITIVE_ACTION_COUNT or b2.shape[0] > ACTION_COUNT:
                 continue
             return _NumpyMlpPolicy(w1=w1, b1=b1, w2=w2, b2=b2), weights_path
         except Exception:
@@ -204,7 +209,7 @@ def _trained_backend_status() -> str:
 
 def _pick_action(agent_type: str, obs: np.ndarray, rng: np.random.Generator) -> int:
     if agent_type == "Random":
-        return int(rng.integers(0, 8))
+        return int(rng.integers(0, ACTION_COUNT))
     if agent_type == "Heuristic":
         return heuristic_action(obs)
     if agent_type == "Trained":
@@ -215,13 +220,13 @@ def _pick_action(agent_type: str, obs: np.ndarray, rng: np.random.Generator) -> 
             return TRAINED_MLP_POLICY.pick_action(obs)
         if TRAINED_TRL_POLICY is not None:
             action = TRAINED_TRL_POLICY.pick_action(obs)
-            if 0 <= action <= 7:
+            if 0 <= action < ACTION_COUNT:
                 return int(action)
     return heuristic_action(obs)
 
 
 def _heuristic_report(obs: np.ndarray) -> str:
-    month = int(round(float(obs[0]) * 6))
+    month = int(round(float(obs[0]) * DEFAULT_EPISODE_LENGTH))
     arr = float(obs[1])
     conv = float(obs[2])
     churn = float(obs[3])

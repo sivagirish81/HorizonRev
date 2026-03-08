@@ -9,7 +9,7 @@ import numpy as np
 from horizonrev.config import HorizonRevConfig
 from horizonrev.dynamics.delayed import make_queue, pop_effects
 from horizonrev.dynamics.drift import apply_market_drift_if_needed, initialize_drift_month
-from horizonrev.dynamics.experiments import ACTION_NAMES
+from horizonrev.dynamics.experiments import ACTION_NAMES, NOOP
 from horizonrev.dynamics.transition import (
     apply_action,
     compute_segment_metrics,
@@ -24,7 +24,7 @@ from horizonrev.utils.seeding import make_rng
 
 
 class HorizonRevEnv:
-    """A 6-step long-horizon revenue strategy environment."""
+    """Long-horizon revenue strategy environment with composite actions."""
 
     metadata = {"name": "HorizonRevEnv", "render_modes": []}
 
@@ -32,7 +32,12 @@ class HorizonRevEnv:
         self.config = config or HorizonRevConfig.default()
         if self.config.reward_mode not in {"capped", "uncapped"}:
             raise ValueError("reward_mode must be either 'capped' or 'uncapped'")
-        self.action_space = make_discrete(8)
+        primitive_actions = len(ACTION_NAMES)
+        if self.config.actions_per_month <= 1:
+            total_actions = primitive_actions
+        else:
+            total_actions = primitive_actions + primitive_actions ** self.config.actions_per_month
+        self.action_space = make_discrete(total_actions)
         self.observation_space = make_box(low=0.0, high=1.0, shape=(12,), dtype=np.float32)
 
         self._rng = make_rng(None)
@@ -58,12 +63,14 @@ class HorizonRevEnv:
         state = self._state
         report_text = self._pending_report if agent_report is None else (agent_report or "")
         self._pending_report = ""
+        applied_actions = self._decode_action_bundle(int(action))
 
         sample_and_update_shocks(state, self.config, self._rng)
         drift_event = apply_market_drift_if_needed(state, self.config)
         delayed_delta, delayed_labels = pop_effects(self._delayed_queue, state["month"])
 
-        apply_action(state, int(action), self.config, self._delayed_queue)
+        for primitive_action in applied_actions:
+            apply_action(state, int(primitive_action), self.config, self._delayed_queue)
         segment_metrics = compute_segment_metrics(state, self.config, delayed_delta, self._rng)
         prev_arr, conversion, churn, transition_details = update_arr_and_base(
             state=state,
@@ -100,7 +107,8 @@ class HorizonRevEnv:
             "arr": float(state["arr"]),
             "conversion": float(conversion),
             "churn": float(churn),
-            "action_name": ACTION_NAMES[int(action)],
+            "action_name": " + ".join(ACTION_NAMES[a] for a in applied_actions),
+            "action_names": [ACTION_NAMES[a] for a in applied_actions],
             "drift_event": bool(drift_event),
             "delayed_effects_applied": delayed_labels,
             "reward_components": reward_components,
@@ -128,8 +136,26 @@ class HorizonRevEnv:
         if hasattr(self.action_space, "contains"):
             if not self.action_space.contains(int(action)):
                 raise ValueError(f"Action {action} is out of bounds for action space")
-        elif not 0 <= int(action) < 8:
+        elif not 0 <= int(action) < int(getattr(self.action_space, "n", len(ACTION_NAMES))):
             raise ValueError(f"Action {action} is out of bounds for action space")
+
+    def _decode_action_bundle(self, action: int) -> list[int]:
+        primitive_count = len(ACTION_NAMES)
+        if action < primitive_count or self.config.actions_per_month <= 1:
+            return [action]
+
+        bundle_index = action - primitive_count
+        actions = []
+        for power in range(self.config.actions_per_month - 1, -1, -1):
+            base = primitive_count ** power
+            token = bundle_index // base
+            bundle_index %= base
+            actions.append(int(token))
+
+        # Treat NOOP-only bundle as a single NOOP for cleaner reporting.
+        if all(a == NOOP for a in actions):
+            return [NOOP]
+        return actions
 
     def _get_observation(self) -> np.ndarray:
         s = self._state

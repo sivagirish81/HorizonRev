@@ -14,11 +14,14 @@ from typing import Callable, Dict, List
 import numpy as np
 
 from horizonrev import HorizonRevConfig, HorizonRevEnv
-from horizonrev.dynamics.experiments import heuristic_action
+from horizonrev.dynamics.experiments import ACTION_NAMES, heuristic_action
 
 
-N_ACTIONS = 8
+BASE_CONFIG = HorizonRevConfig.default()
+PRIMITIVE_ACTIONS = len(ACTION_NAMES)
+N_ACTIONS = PRIMITIVE_ACTIONS + PRIMITIVE_ACTIONS ** BASE_CONFIG.actions_per_month
 OBS_DIM = 12
+EPISODE_LENGTH = BASE_CONFIG.episode_length
 
 
 def config_for_reward_mode(cfg: HorizonRevConfig, reward_mode: str) -> HorizonRevConfig:
@@ -28,7 +31,7 @@ def config_for_reward_mode(cfg: HorizonRevConfig, reward_mode: str) -> HorizonRe
 def report_for_style(obs: np.ndarray, style: str) -> str:
     if style != "structured":
         return "Action selected."
-    month = int(round(float(obs[0]) * 6))
+    month = int(round(float(obs[0]) * EPISODE_LENGTH))
     return (
         f"Hypothesis: month {month} plan can improve ARR while controlling churn.\n"
         "Action: pick discount/onboarding/sales focus based on current metrics.\n"
@@ -89,6 +92,7 @@ class MlpPolicy:
         lr: float,
         gamma: float,
         entropy_coef: float,
+        max_grad_norm: float,
     ) -> None:
         returns = np.zeros(len(rewards), dtype=np.float32)
         running = 0.0
@@ -115,6 +119,21 @@ class MlpPolicy:
             dw1 += np.outer(obs, dh)
             db1 += dh
 
+        if max_grad_norm > 0.0:
+            grad_sq = float(
+                np.sum(dw1 * dw1)
+                + np.sum(db1 * db1)
+                + np.sum(dw2 * dw2)
+                + np.sum(db2 * db2)
+            )
+            grad_norm = float(np.sqrt(max(1e-12, grad_sq)))
+            if grad_norm > max_grad_norm:
+                clip_scale = max_grad_norm / grad_norm
+                dw1 *= clip_scale
+                db1 *= clip_scale
+                dw2 *= clip_scale
+                db2 *= clip_scale
+
         scale = 1.0 / max(1, len(actions))
         self.w1 += lr * dw1 * scale
         self.b1 += lr * db1 * scale
@@ -130,8 +149,11 @@ def train(
     train_seed_start: int,
     train_seed_count: int,
     learning_rate: float,
+    min_learning_rate: float,
     gamma: float,
-    entropy_coef: float,
+    entropy_coef_start: float,
+    entropy_coef_end: float,
+    max_grad_norm: float,
     log_every: int,
 ) -> List[float]:
     rewards: List[float] = []
@@ -139,6 +161,10 @@ def train(
     rng = np.random.default_rng(123)
 
     for ep in range(episodes):
+        progress = float(ep) / float(max(1, episodes - 1))
+        entropy_coef = entropy_coef_start + (entropy_coef_end - entropy_coef_start) * progress
+        lr = learning_rate + (min_learning_rate - learning_rate) * progress
+
         seed = train_seeds[ep % len(train_seeds)]
         env = HorizonRevEnv(config_for_reward_mode(HorizonRevConfig.base_case(), reward_mode))
         obs = env.reset(seed=seed)
@@ -171,13 +197,17 @@ def train(
             probs_list=probs_list,
             actions=actions,
             rewards=step_rewards,
-            lr=learning_rate,
+            lr=lr,
             gamma=gamma,
             entropy_coef=entropy_coef,
+            max_grad_norm=max_grad_norm,
         )
         rewards.append(total)
         if (ep + 1) % log_every == 0:
-            print(f"[train] ep={ep + 1}/{episodes} avg_reward_last_{log_every}={np.mean(rewards[-log_every:]):.3f}")
+            print(
+                f"[train] ep={ep + 1}/{episodes} avg_reward_last_{log_every}={np.mean(rewards[-log_every:]):.3f} "
+                f"lr={lr:.5f} entropy_coef={entropy_coef:.5f}"
+            )
     return rewards
 
 
@@ -243,10 +273,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-seed-count", type=int, default=800)
     parser.add_argument("--eval-seed-start", type=int, default=10_000)
     parser.add_argument("--eval-seed-count", type=int, default=300)
-    parser.add_argument("--hidden-dim", type=int, default=64)
-    parser.add_argument("--learning-rate", type=float, default=0.01)
+    parser.add_argument("--hidden-dim", type=int, default=128)
+    parser.add_argument("--learning-rate", type=float, default=0.003)
+    parser.add_argument("--min-learning-rate", type=float, default=0.0005)
     parser.add_argument("--gamma", type=float, default=1.0)
-    parser.add_argument("--entropy-coef", type=float, default=0.001)
+    parser.add_argument("--entropy-coef-start", type=float, default=0.02)
+    parser.add_argument("--entropy-coef-end", type=float, default=0.003)
+    parser.add_argument("--max-grad-norm", type=float, default=1.5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--policy-out", default="artifacts/trained_policy_mlp.npz")
@@ -258,6 +291,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     print(f"train_episodes={args.train_episodes}, reward_mode={args.reward_mode}, report_style={args.report_style}")
+    print(
+        "schedule="
+        f"lr({args.learning_rate}->{args.min_learning_rate}), "
+        f"entropy({args.entropy_coef_start}->{args.entropy_coef_end}), "
+        f"hidden_dim={args.hidden_dim}, max_grad_norm={args.max_grad_norm}"
+    )
     policy = MlpPolicy(obs_dim=OBS_DIM, hidden_dim=args.hidden_dim, n_actions=N_ACTIONS, seed=args.seed)
     training_rewards = train(
         policy=policy,
@@ -267,8 +306,11 @@ def main() -> None:
         train_seed_start=args.train_seed_start,
         train_seed_count=args.train_seed_count,
         learning_rate=args.learning_rate,
+        min_learning_rate=args.min_learning_rate,
         gamma=args.gamma,
-        entropy_coef=args.entropy_coef,
+        entropy_coef_start=args.entropy_coef_start,
+        entropy_coef_end=args.entropy_coef_end,
+        max_grad_norm=args.max_grad_norm,
         log_every=args.log_every,
     )
 
@@ -282,6 +324,8 @@ def main() -> None:
         "policy_type": "mlp_numpy",
         "policy_path": str(policy_out),
         "obs_dim": OBS_DIM,
+        "episode_length": EPISODE_LENGTH,
+        "actions_per_month": BASE_CONFIG.actions_per_month,
         "hidden_dim": args.hidden_dim,
         "n_actions": N_ACTIONS,
         "reward_mode": args.reward_mode,
