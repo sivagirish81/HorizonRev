@@ -2,7 +2,7 @@
 
 HorizonRev is a lightweight, reusable reinforcement learning environment for long-horizon revenue strategy design. An agent makes monthly go-to-market decisions across six months while handling delayed churn effects and a mid-episode market drift event.
 
-Built for hackathons and rapid experimentation:
+Project capabilities:
 
 - Core environment package with minimal dependencies
 - OpenEnv-compatible API (`reset`, `step`, `action_space`, `observation_space`)
@@ -215,6 +215,14 @@ Run the app:
 python apps/hf_space_app.py
 ```
 
+For statistically robust demo comparison, use `Compare Random vs Heuristic/Trained`:
+
+- compare now evaluates on unseen seeds (`1000..1099`)
+- reports mean, std, and 95% CI (not just a single average)
+- runs across multiple scenarios (`base_case`, `pessimistic`, `macro_downturn`)
+- uses consistent report style for all agents during comparison
+- charts include both step reward and cumulative reward
+
 ## Colab / TRL PPO Training
 
 Open `notebooks/HorizonRev_TRL_Train.ipynb` in Colab.
@@ -234,6 +242,50 @@ For a direct Colab-friendly version that includes minimal-vs-structured report b
 
 - `notebooks/HorizonRev_TRL_Train_Colab.ipynb`
 
+## Recommended RL Evaluation Protocol
+
+For reliable evidence beyond single-run outcomes:
+
+- Train for `>= 1200` episodes
+- Evaluate on unseen seeds (`>= 300`)
+- Compare against both `Random` and `Heuristic`
+- Report `mean`, `std`, and `95% CI`
+- Test across scenarios (`base_case`, `pessimistic`, `macro_downturn`, `optimistic`)
+- Keep reward mode and report style consistent between training and evaluation
+
+Use the training and evaluation script:
+
+```bash
+pip install -r requirements-train.txt
+pip install -e .
+python scripts/train_ppo.py --train-episodes 1200 --eval-seed-count 300
+```
+
+Artifacts:
+
+- policy weights: `horizonrev_trl_policy.pt` (or custom `--policy-out`)
+- policy metadata: `artifacts/policy_metadata.json` (model backbone + policy path for app loading)
+- metrics JSON: `artifacts/evaluation_metrics.json`
+
+## Northflank Training Job
+
+Use `Dockerfile.train` as the build image for a Northflank Job.
+
+Recommended command:
+
+```bash
+python scripts/train_ppo.py \
+  --train-episodes 2000 \
+  --eval-seed-count 500 \
+  --reward-mode uncapped \
+  --report-style structured \
+  --policy-out artifacts/horizonrev_trl_policy.pt \
+  --policy-metadata-out artifacts/policy_metadata.json \
+  --metrics-out artifacts/evaluation_metrics.json
+```
+
+After job completion, retrieve artifacts and place `horizonrev_trl_policy.pt` at repo root (or Space root) for app inference.
+
 ## Hugging Face Spaces Deployment (Gradio)
 
 1. Create a new Space (SDK: Gradio)
@@ -251,6 +303,8 @@ horizonrev/
   LICENSE
   requirements.txt
   requirements-space.txt
+  requirements-train.txt
+  Dockerfile.train
   src/
     horizonrev/
       __init__.py
@@ -284,4 +338,6 @@ horizonrev/
   notebooks/
     HorizonRev_TRL_Train.ipynb
     HorizonRev_TRL_Train_Colab.ipynb
+  scripts/
+    train_ppo.py
 ```

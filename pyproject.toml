@@ -27,7 +27,21 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
-space = ["gradio>=4.0.0", "matplotlib>=3.7.0"]
+space = [
+  "gradio>=4.0.0",
+  "matplotlib>=3.7.0",
+  "torch>=2.6",
+  "transformers>=4.56,<5",
+  "safetensors>=0.5",
+]
+train = [
+  "torch>=2.6",
+  "transformers>=4.56,<5",
+  "trl>=0.22",
+  "accelerate>=1.0",
+  "peft>=0.14",
+  "safetensors>=0.5",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

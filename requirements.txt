@@ -1,2 +1,14 @@
 openenv-core==0.2.1
-numpy
+numpy>=1.26
+
+# Common local dev dependency.
+pytest>=8.0
+
+# Trained policy (.pt) support for local app + training.
+# Use modern versions so Python 3.14 does not attempt old tokenizers builds.
+torch>=2.6
+transformers>=4.56,<5
+trl>=0.22
+accelerate>=1.0
+peft>=0.14
+safetensors>=0.5
