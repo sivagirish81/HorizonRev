@@ -1,3 +1,8 @@
 -e .
 gradio>=4.0.0
 matplotlib>=3.7.0
+
+# Needed for loading horizonrev_trl_policy.pt in apps/hf_space_app.py.
+torch>=2.6
+transformers>=4.56,<5
+safetensors>=0.5

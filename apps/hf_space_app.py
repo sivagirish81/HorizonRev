@@ -51,7 +51,8 @@ class _TrlPolicy:
 
     def pick_action(self, obs: np.ndarray) -> int:
         prompt = _obs_to_text(obs)
-        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.model.pretrained_model.device)
+        model_device = next(self.model.parameters()).device
+        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(model_device)
         with np.errstate(all="ignore"):
             with __import__("torch").no_grad():
                 out = self.model.generate(input_ids, max_new_tokens=4, do_sample=False)
@@ -70,17 +71,20 @@ def _maybe_load_trained_weights():
 
 
 TRAINED_WEIGHTS = _maybe_load_trained_weights()
+TRL_POLICY_LOAD_ERROR: str | None = None
 
 
 def _maybe_load_trl_policy():
+    global TRL_POLICY_LOAD_ERROR
     pt_path = Path("horizonrev_trl_policy.pt")
     if not pt_path.exists():
+        TRL_POLICY_LOAD_ERROR = "horizonrev_trl_policy.pt not found"
         return None
     try:
         import torch
-        from transformers import AutoTokenizer
-        from trl import AutoModelForCausalLMWithValueHead
-    except Exception:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except Exception as exc:
+        TRL_POLICY_LOAD_ERROR = f"Dependency import failed: {exc!r}"
         return None
 
     try:
@@ -89,13 +93,15 @@ def _maybe_load_trl_policy():
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.add_special_tokens({"additional_special_tokens": ACTION_TOKENS})
-        model = AutoModelForCausalLMWithValueHead.from_pretrained(model_name)
-        model.pretrained_model.resize_token_embeddings(len(tokenizer))
+        model = AutoModelForCausalLM.from_pretrained(model_name)
+        model.resize_token_embeddings(len(tokenizer))
         state_dict = torch.load(pt_path, map_location="cpu")
         model.load_state_dict(state_dict, strict=False)
         model.eval()
+        TRL_POLICY_LOAD_ERROR = None
         return _TrlPolicy(model, tokenizer)
-    except Exception:
+    except Exception as exc:
+        TRL_POLICY_LOAD_ERROR = f"Policy load failed: {exc!r}"
         return None
 
 
@@ -109,7 +115,8 @@ def _trained_backend_status() -> str:
     if TRAINED_TRL_POLICY is not None:
         return "horizonrev_trl_policy.pt"
     if HAS_TRL_PT_FILE:
-        return "horizonrev_trl_policy.pt found but not loadable (install torch/transformers/trl)"
+        detail = TRL_POLICY_LOAD_ERROR or "unknown error"
+        return f"horizonrev_trl_policy.pt found but not loadable: {detail}"
     return "none (Trained falls back to heuristic)"
 
 
