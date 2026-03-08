@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -12,4 +12,4 @@ RUN pip install --upgrade pip && pip install -r /workspace/requirements-train.tx
 COPY . /workspace
 RUN pip install -e .
 
-CMD ["python", "scripts/train_ppo.py", "--train-episodes", "1200", "--eval-seed-count", "300", "--policy-out", "artifacts/horizonrev_trl_policy.pt", "--policy-metadata-out", "artifacts/policy_metadata.json", "--metrics-out", "artifacts/evaluation_metrics.json"]
+CMD ["python", "scripts/train_mlp.py", "--train-episodes", "1200", "--eval-seed-count", "300", "--policy-out", "artifacts/trained_policy_mlp.npz", "--policy-metadata-out", "artifacts/policy_metadata.json", "--metrics-out", "artifacts/evaluation_metrics.json"]
