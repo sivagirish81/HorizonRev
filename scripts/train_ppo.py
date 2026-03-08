@@ -140,7 +140,17 @@ def train(
             q = tokenizer(obs_to_text(obs), return_tensors="pt").input_ids.squeeze(0).to(
                 ppo_trainer.model.pretrained_model.device
             )
-            r = ppo_trainer.generate(q, max_new_tokens=4, do_sample=True, top_k=0, top_p=1.0)
+            q_attention_mask = torch.ones_like(q)
+            pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+            r = ppo_trainer.generate(
+                q,
+                attention_mask=q_attention_mask,
+                pad_token_id=pad_token_id,
+                max_new_tokens=4,
+                do_sample=True,
+                top_k=0,
+                top_p=1.0,
+            )
             response_tokens = r[0][q.shape[-1] :] if r.ndim == 2 else r[q.shape[-1] :]
             generated = tokenizer.decode(response_tokens, skip_special_tokens=False)
             action = decode_action(generated, py_rng)
@@ -199,8 +209,16 @@ def evaluate_agent(
                 action = heuristic_action(obs)
             else:
                 q = tokenizer(obs_to_text(obs), return_tensors="pt").input_ids.to(model.pretrained_model.device)
+                q_attention_mask = torch.ones_like(q)
+                pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
                 with torch.no_grad():
-                    r = model.generate(q, max_new_tokens=4, do_sample=False)
+                    r = model.generate(
+                        q,
+                        attention_mask=q_attention_mask,
+                        pad_token_id=pad_token_id,
+                        max_new_tokens=4,
+                        do_sample=False,
+                    )
                 action_text = tokenizer.decode(r[0][q.shape[-1] :], skip_special_tokens=False)
                 action = decode_action(action_text, py_rng)
             env.submit_report(report_for_style(obs, report_style))
