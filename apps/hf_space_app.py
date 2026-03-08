@@ -22,6 +22,7 @@ class AppState:
     done: bool = False
     logs: List[str] = field(default_factory=list)
     history: Dict[str, List[float]] = field(default_factory=lambda: {"month": [], "arr": [], "churn": [], "reward": []})
+    reward_mode: str = "capped"
 
 
 def _maybe_load_trained_weights():
@@ -29,7 +30,7 @@ def _maybe_load_trained_weights():
     if not weights_path.exists():
         return None
     arr = np.load(weights_path)
-    if arr.shape != (10, 8):
+    if arr.shape != (12, 8):
         return None
     return arr
 
@@ -48,6 +49,25 @@ def _pick_action(agent_type: str, obs: np.ndarray, rng: np.random.Generator) -> 
     return heuristic_action(obs)
 
 
+def _heuristic_report(obs: np.ndarray) -> str:
+    month = int(round(float(obs[0]) * 6))
+    arr = float(obs[1])
+    conv = float(obs[2])
+    churn = float(obs[3])
+    discount = float(obs[4])
+    pct_young = float(obs[10])
+    avg_quality = float(obs[11])
+    return (
+        f"Hypothesis: At month {month}, improving conversion without harming churn can raise ARR.\n"
+        f"Action: Balance discount and onboarding while adjusting sales focus by month.\n"
+        f"Expected Impact: ARR improves from stronger conversion with controlled churn after delay.\n"
+        f"Risks: High discount can raise delayed churn; drift can shift response sensitivity.\n"
+        f"Next Step: Track ARR, churn, conversion, discount, drift, and month for next action.\n"
+        f"Current snapshot: arr={arr:.3f}, conversion={conv:.3f}, churn={churn:.3f}, discount={discount:.3f}, "
+        f"pct_young={pct_young:.3f}, avg_quality={avg_quality:.3f}."
+    )
+
+
 def _make_figure(history: Dict[str, List[float]]):
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.5))
     months = history["month"] or [0]
@@ -64,25 +84,54 @@ def _make_figure(history: Dict[str, List[float]]):
     return fig
 
 
-def _reset(state: AppState):
-    state.env = HorizonRevEnv(HorizonRevConfig.default())
+def _component_text(info: dict | None) -> str:
+    if not info:
+        return "No step yet."
+    c = info["reward_components"]
+    return (
+        f"reward_mode={info.get('reward_mode')}\n"
+        f"planning_quality_score={c.get('planning_quality_score', 0.0):.3f}\n"
+        f"token_count={c.get('token_count', 0)}\n"
+        f"token_bonus={c.get('token_bonus', 0.0):.3f}\n"
+        f"token_bonus_component={c.get('token_bonus_component', 0.0):.3f}\n"
+        f"delta_arr_component={c.get('delta_arr_component', 0.0):.3f}\n"
+        f"churn_penalty={c.get('churn_penalty', 0.0):.3f}\n"
+        f"confounding_penalty={c.get('confounding_penalty', 0.0):.3f}\n"
+        f"churn_volatility_penalty={c.get('churn_volatility_penalty', 0.0):.3f}\n"
+        f"episode_reward_total={info.get('episode_reward_total', 0.0):.3f}"
+    )
+
+
+def _reset(state: AppState, reward_mode: str):
+    config = HorizonRevConfig.default()
+    config = HorizonRevConfig(**{**config.__dict__, "reward_mode": reward_mode})
+    state.env = HorizonRevEnv(config)
     state.obs = state.env.reset(seed=123)
     state.done = False
+    state.reward_mode = reward_mode
     state.logs = ["Environment reset."]
     state.history = {"month": [], "arr": [], "churn": [], "reward": []}
-    return state, _make_figure(state.history), "\n".join(state.logs)
+    return state, _make_figure(state.history), "\n".join(state.logs), "No step yet."
 
 
-def _step(agent_type: str, state: AppState):
+def _step(agent_type: str, reward_mode: str, report_text: str, state: AppState):
     if state.obs is None:
-        state, fig, log_text = _reset(state)
-        return state, fig, log_text
+        state, fig, log_text, comp_text = _reset(state, reward_mode)
+        return state, fig, log_text, comp_text
     if state.done:
         state.logs.append("Episode already finished. Press Reset.")
-        return state, _make_figure(state.history), "\n".join(state.logs)
+        return state, _make_figure(state.history), "\n".join(state.logs), "Episode complete."
+    if state.reward_mode != reward_mode:
+        state, fig, log_text, comp_text = _reset(state, reward_mode)
+        return state, fig, log_text, comp_text
 
     rng = np.random.default_rng(1234 + len(state.history["month"]))
     action = _pick_action(agent_type, state.obs, rng)
+    final_report = report_text.strip()
+    if not final_report and agent_type == "Heuristic":
+        final_report = _heuristic_report(state.obs)
+    if final_report:
+        state.env.submit_report(final_report)
     obs, reward, done, info = state.env.step(action)
     state.obs = obs
     state.done = done
@@ -96,44 +145,67 @@ def _step(agent_type: str, state: AppState):
         state.logs.append("Market drift event triggered at month 3.")
     if info["delayed_effects_applied"]:
         state.logs.append(f"Delayed effects: {info['delayed_effects_applied']}")
+    if info["active_shocks"]:
+        state.logs.append(f"Active shocks: {info['active_shocks']}")
+    state.logs.append(
+        f"Customers={info['total_customers']:.1f} new={info['new_customers']:.1f} "
+        f"churned={info['churned_customers']:.1f} young={info['pct_young_customers']:.3f} "
+        f"quality={info['avg_quality']:.3f} cohorts={info['cohort_summary']}"
+    )
+    state.logs.append(
+        f"Planning quality={info['reward_components'].get('planning_quality_score', 0.0):.3f} | "
+        f"Token bonus={info['reward_components'].get('token_bonus', 0.0):.3f}"
+    )
 
-    return state, _make_figure(state.history), "\n".join(state.logs)
+    return state, _make_figure(state.history), "\n".join(state.logs), _component_text(info)
 
 
-def _run_episode(agent_type: str, state: AppState):
+def _run_episode(agent_type: str, reward_mode: str, report_text: str, state: AppState):
     if state.obs is None or state.done:
-        state, _, _ = _reset(state)
+        state, _, _, _ = _reset(state, reward_mode)
     while not state.done:
-        state, _, _ = _step(agent_type, state)
-    return state, _make_figure(state.history), "\n".join(state.logs)
+        state, _, _, _ = _step(agent_type, reward_mode, report_text, state)
+    return state, _make_figure(state.history), "\n".join(state.logs), "Episode complete."
 
 
-def _evaluate_agent(agent_type: str, n_episodes: int = 20) -> float:
+def _evaluate_agent(agent_type: str, reward_mode: str, report_style: str, n_episodes: int = 20) -> float:
+    config = HorizonRevConfig.default()
+    config = HorizonRevConfig(**{**config.__dict__, "reward_mode": reward_mode})
     rewards = []
     for ep in range(n_episodes):
-        env = HorizonRevEnv(HorizonRevConfig.default())
+        env = HorizonRevEnv(config)
         obs = env.reset(seed=ep)
         done = False
         total = 0.0
         rng = np.random.default_rng(ep)
         while not done:
             action = _pick_action(agent_type, obs, rng)
+            if report_style == "structured":
+                env.submit_report(_heuristic_report(obs))
+            else:
+                env.submit_report("Action selected.")
             obs, reward, done, _ = env.step(action)
             total += reward
         rewards.append(total)
     return float(np.mean(rewards))
 
 
-def _compare(agent_type: str, state: AppState):
-    baseline = _evaluate_agent("Random", n_episodes=20)
-    contender = _evaluate_agent(agent_type if agent_type != "Random" else "Heuristic", n_episodes=20)
+def _compare(agent_type: str, reward_mode: str, state: AppState):
+    baseline = _evaluate_agent("Random", reward_mode=reward_mode, report_style="minimal", n_episodes=20)
+    contender = _evaluate_agent(
+        agent_type if agent_type != "Random" else "Heuristic",
+        reward_mode=reward_mode,
+        report_style="structured",
+        n_episodes=20,
+    )
     lines = [
+        f"Reward mode: {reward_mode}",
         f"Random avg reward (20 eps): {baseline:.3f}",
-        f"{agent_type if agent_type != 'Random' else 'Heuristic'} avg reward (20 eps): {contender:.3f}",
+        f"{agent_type if agent_type != 'Random' else 'Heuristic'} avg reward (20 eps, structured report): {contender:.3f}",
         f"Improvement: {contender - baseline:+.3f}",
     ]
     state.logs.extend(lines)
-    return state, _make_figure(state.history), "\n".join(state.logs)
+    return state, _make_figure(state.history), "\n".join(state.logs), "See logs for compare output."
 
 
 with gr.Blocks(title="HorizonRev") as demo:
@@ -141,9 +213,16 @@ with gr.Blocks(title="HorizonRev") as demo:
     gr.Markdown("Manage discounts, onboarding, and sales focus with delayed churn effects and market drift.")
 
     agent = gr.Dropdown(choices=["Random", "Heuristic", "Trained"], value="Heuristic", label="Agent Type")
+    reward_mode = gr.Radio(choices=["capped", "uncapped"], value="capped", label="Reward Mode")
+    report = gr.Textbox(
+        label="Agent Report (optional, structured reports improve token bonus)",
+        lines=8,
+        placeholder="Hypothesis: ...\nAction: ...\nExpected Impact: ...\nRisks: ...\nNext Step: ...",
+    )
     state = gr.State(AppState())
     plot = gr.Plot(label="Episode Metrics")
     logs = gr.Textbox(label="Logs", lines=16)
+    reward_components = gr.Textbox(label="Latest Reward Components", lines=9)
 
     with gr.Row():
         btn_reset = gr.Button("Reset")
@@ -151,12 +230,12 @@ with gr.Blocks(title="HorizonRev") as demo:
         btn_run = gr.Button("Run Episode")
         btn_compare = gr.Button("Compare Random vs Heuristic/Trained")
 
-    btn_reset.click(fn=_reset, inputs=[state], outputs=[state, plot, logs])
-    btn_step.click(fn=_step, inputs=[agent, state], outputs=[state, plot, logs])
-    btn_run.click(fn=_run_episode, inputs=[agent, state], outputs=[state, plot, logs])
-    btn_compare.click(fn=_compare, inputs=[agent, state], outputs=[state, plot, logs])
+    btn_reset.click(fn=_reset, inputs=[state, reward_mode], outputs=[state, plot, logs, reward_components])
+    btn_step.click(fn=_step, inputs=[agent, reward_mode, report, state], outputs=[state, plot, logs, reward_components])
+    btn_run.click(fn=_run_episode, inputs=[agent, reward_mode, report, state], outputs=[state, plot, logs, reward_components])
+    btn_compare.click(fn=_compare, inputs=[agent, reward_mode, state], outputs=[state, plot, logs, reward_components])
 
-    demo.load(fn=_reset, inputs=[state], outputs=[state, plot, logs])
+    demo.load(fn=_reset, inputs=[state, reward_mode], outputs=[state, plot, logs, reward_components])
 
 
 if __name__ == "__main__":

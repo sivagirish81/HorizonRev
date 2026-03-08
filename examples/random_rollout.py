@@ -21,7 +21,8 @@ def main() -> None:
         step_idx += 1
         print(
             f"step={step_idx} action={ACTION_NAMES[int(action)]} reward={reward:.3f} "
-            f"arr={info['arr']:.2f} churn={info['churn']:.3f} drift={info['drift_event']}"
+            f"arr={info['arr']:.2f} churn={info['churn']:.3f} drift={info['drift_event']} "
+            f"new={info['new_customers']:.1f} churned={info['churned_customers']:.1f} shocks={info['active_shocks']}"
         )
         if info["delayed_effects_applied"]:
             print(" delayed:", info["delayed_effects_applied"])
