@@ -39,4 +39,4 @@ def test_env_api_contract():
             "cohort_summary",
         ]:
             assert key in info
-    assert steps == 6
+    assert steps == env.config.episode_length
