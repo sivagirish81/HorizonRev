@@ -39,6 +39,7 @@ ACTION_TOKENS = [f"<A{i}>" for i in range(8)]
 DEFAULT_TRL_MODEL_NAME = "sshleifer/tiny-gpt2"
 DEFAULT_TRL_POLICY_PATH = Path("horizonrev_trl_policy.pt")
 POLICY_METADATA_CANDIDATES = [Path("artifacts/policy_metadata.json"), Path("policy_metadata.json")]
+MLP_POLICY_CANDIDATES = [Path("trained_policy_mlp.npz"), Path("artifacts/trained_policy_mlp.npz")]
 
 
 def _obs_to_text(obs: np.ndarray) -> str:
@@ -71,6 +72,19 @@ class _TrlPolicy:
                 out = self.model.generate(input_ids, max_new_tokens=4, do_sample=False)
         generated = self.tokenizer.decode(out[0][input_ids.shape[-1] :], skip_special_tokens=False)
         return _decode_action(generated)
+
+
+class _NumpyMlpPolicy:
+    def __init__(self, w1: np.ndarray, b1: np.ndarray, w2: np.ndarray, b2: np.ndarray):
+        self.w1 = w1
+        self.b1 = b1
+        self.w2 = w2
+        self.b2 = b2
+
+    def pick_action(self, obs: np.ndarray) -> int:
+        hidden = np.tanh(obs @ self.w1 + self.b1)
+        logits = hidden @ self.w2 + self.b2
+        return int(np.argmax(logits))
 
 
 def _load_policy_metadata() -> dict:
@@ -106,15 +120,42 @@ def _maybe_load_trained_weights():
     return arr
 
 
+def _maybe_load_mlp_policy():
+    for weights_path in MLP_POLICY_CANDIDATES:
+        if not weights_path.exists():
+            continue
+        try:
+            data = np.load(weights_path)
+            w1 = np.asarray(data["w1"], dtype=np.float32)
+            b1 = np.asarray(data["b1"], dtype=np.float32)
+            w2 = np.asarray(data["w2"], dtype=np.float32)
+            b2 = np.asarray(data["b2"], dtype=np.float32)
+            if w1.ndim != 2 or b1.ndim != 1 or w2.ndim != 2 or b2.ndim != 1:
+                continue
+            if w1.shape[0] != 12 or w2.shape[1] != 8 or w1.shape[1] != b1.shape[0] or w2.shape[0] != b1.shape[0]:
+                continue
+            if b2.shape[0] != 8:
+                continue
+            return _NumpyMlpPolicy(w1=w1, b1=b1, w2=w2, b2=b2), weights_path
+        except Exception:
+            continue
+    return None, None
+
+
 TRAINED_WEIGHTS = _maybe_load_trained_weights()
+TRAINED_MLP_POLICY, TRAINED_MLP_POLICY_PATH = _maybe_load_mlp_policy()
 TRL_POLICY_LOAD_ERROR: str | None = None
 POLICY_METADATA = _load_policy_metadata()
 TRL_POLICY_PATH = _resolve_policy_path(POLICY_METADATA)
 TRL_MODEL_NAME = str(POLICY_METADATA.get("model_name", DEFAULT_TRL_MODEL_NAME))
+POLICY_TYPE = str(POLICY_METADATA.get("policy_type", "trl_causal_lm"))
 
 
 def _maybe_load_trl_policy():
     global TRL_POLICY_LOAD_ERROR
+    if POLICY_TYPE != "trl_causal_lm":
+        TRL_POLICY_LOAD_ERROR = f"policy_type={POLICY_TYPE} is not TRL"
+        return None
     pt_path = TRL_POLICY_PATH
     if not pt_path.exists():
         TRL_POLICY_LOAD_ERROR = f"{pt_path} not found"
@@ -151,6 +192,8 @@ HAS_TRL_PT_FILE = TRL_POLICY_PATH.exists()
 def _trained_backend_status() -> str:
     if TRAINED_WEIGHTS is not None:
         return "trained_policy.npy"
+    if TRAINED_MLP_POLICY is not None and TRAINED_MLP_POLICY_PATH is not None:
+        return str(TRAINED_MLP_POLICY_PATH)
     if TRAINED_TRL_POLICY is not None:
         return f"{TRL_POLICY_PATH} (model={TRL_MODEL_NAME})"
     if HAS_TRL_PT_FILE:
@@ -168,6 +211,8 @@ def _pick_action(agent_type: str, obs: np.ndarray, rng: np.random.Generator) -> 
         if TRAINED_WEIGHTS is not None:
             logits = obs @ TRAINED_WEIGHTS
             return int(np.argmax(logits))
+        if TRAINED_MLP_POLICY is not None:
+            return TRAINED_MLP_POLICY.pick_action(obs)
         if TRAINED_TRL_POLICY is not None:
             action = TRAINED_TRL_POLICY.pick_action(obs)
             if 0 <= action <= 7:

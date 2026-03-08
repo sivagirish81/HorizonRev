@@ -258,13 +258,13 @@ Use the training and evaluation script:
 ```bash
 pip install -r requirements-train.txt
 pip install -e .
-python scripts/train_ppo.py --train-episodes 1200 --eval-seed-count 300
+python scripts/train_mlp.py --train-episodes 1200 --eval-seed-count 300
 ```
 
 Artifacts:
 
-- policy weights: `horizonrev_trl_policy.pt` (or custom `--policy-out`)
-- policy metadata: `artifacts/policy_metadata.json` (model backbone + policy path for app loading)
+- policy weights: `artifacts/trained_policy_mlp.npz` (or custom `--policy-out`)
+- policy metadata: `artifacts/policy_metadata.json` (policy type + policy path for app loading)
 - metrics JSON: `artifacts/evaluation_metrics.json`
 
 ## Northflank Training Job
@@ -274,17 +274,17 @@ Use `Dockerfile.train` as the build image for a Northflank Job.
 Recommended command:
 
 ```bash
-python scripts/train_ppo.py \
+python scripts/train_mlp.py \
   --train-episodes 2000 \
   --eval-seed-count 500 \
   --reward-mode uncapped \
   --report-style structured \
-  --policy-out artifacts/horizonrev_trl_policy.pt \
+  --policy-out artifacts/trained_policy_mlp.npz \
   --policy-metadata-out artifacts/policy_metadata.json \
   --metrics-out artifacts/evaluation_metrics.json
 ```
 
-After job completion, retrieve artifacts and place `horizonrev_trl_policy.pt` at repo root (or Space root) for app inference.
+After job completion, retrieve artifacts and place `trained_policy_mlp.npz` in repo root (or keep it under `artifacts/`) for app inference.
 
 ## Hugging Face Spaces Deployment (Gradio)
 
@@ -340,4 +340,5 @@ horizonrev/
     HorizonRev_TRL_Train_Colab.ipynb
   scripts/
     train_ppo.py
+    train_mlp.py
 ```
