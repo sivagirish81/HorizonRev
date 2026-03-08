@@ -143,6 +143,7 @@ def train(
                 ppo_trainer.model.pretrained_model.device
             )
 <<<<<<< HEAD
+<<<<<<< HEAD
             q_attention_mask = torch.ones_like(q).unsqueeze(0)
 =======
 <<<<<<< HEAD
@@ -155,6 +156,9 @@ def train(
             q_attention_mask = torch.ones_like(q).unsqueeze(0)
 >>>>>>> 3f47486 (Fix tensor shape mismatch)
 >>>>>>> ec754da (Fix tensor shape mismatch)
+=======
+            q_attention_mask = torch.ones_like(q).unsqueeze(0)
+>>>>>>> 3621e92 (Finalize MLP Colab defaults and clean PPO conflict markers.)
             pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
             r = ppo_trainer.generate(
                 q,
