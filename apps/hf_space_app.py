@@ -25,6 +25,40 @@ class AppState:
     reward_mode: str = "capped"
 
 
+ACTION_TOKENS = [f"<A{i}>" for i in range(8)]
+
+
+def _obs_to_text(obs: np.ndarray) -> str:
+    return (
+        f"month={obs[0]:.3f} arr={obs[1]:.3f} conv={obs[2]:.3f} churn={obs[3]:.3f} "
+        f"discount={obs[4]:.3f} smb_dem={obs[5]:.3f} ent_dem={obs[6]:.3f} "
+        f"pricing={int(obs[7])} onboarding={int(obs[8])} focus={int(obs[9])}. "
+        f"Emit one action token from: {' '.join(ACTION_TOKENS)}"
+    )
+
+
+def _decode_action(text: str) -> int:
+    for idx, tok in enumerate(ACTION_TOKENS):
+        if tok in text:
+            return idx
+    return -1
+
+
+class _TrlPolicy:
+    def __init__(self, model, tokenizer):
+        self.model = model
+        self.tokenizer = tokenizer
+
+    def pick_action(self, obs: np.ndarray) -> int:
+        prompt = _obs_to_text(obs)
+        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.model.pretrained_model.device)
+        with np.errstate(all="ignore"):
+            with __import__("torch").no_grad():
+                out = self.model.generate(input_ids, max_new_tokens=4, do_sample=False)
+        generated = self.tokenizer.decode(out[0][input_ids.shape[-1] :], skip_special_tokens=False)
+        return _decode_action(generated)
+
+
 def _maybe_load_trained_weights():
     weights_path = Path("trained_policy.npy")
     if not weights_path.exists():
@@ -38,14 +72,60 @@ def _maybe_load_trained_weights():
 TRAINED_WEIGHTS = _maybe_load_trained_weights()
 
 
+def _maybe_load_trl_policy():
+    pt_path = Path("horizonrev_trl_policy.pt")
+    if not pt_path.exists():
+        return None
+    try:
+        import torch
+        from transformers import AutoTokenizer
+        from trl import AutoModelForCausalLMWithValueHead
+    except Exception:
+        return None
+
+    try:
+        model_name = "sshleifer/tiny-gpt2"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.add_special_tokens({"additional_special_tokens": ACTION_TOKENS})
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(model_name)
+        model.pretrained_model.resize_token_embeddings(len(tokenizer))
+        state_dict = torch.load(pt_path, map_location="cpu")
+        model.load_state_dict(state_dict, strict=False)
+        model.eval()
+        return _TrlPolicy(model, tokenizer)
+    except Exception:
+        return None
+
+
+TRAINED_TRL_POLICY = _maybe_load_trl_policy()
+HAS_TRL_PT_FILE = Path("horizonrev_trl_policy.pt").exists()
+
+
+def _trained_backend_status() -> str:
+    if TRAINED_WEIGHTS is not None:
+        return "trained_policy.npy"
+    if TRAINED_TRL_POLICY is not None:
+        return "horizonrev_trl_policy.pt"
+    if HAS_TRL_PT_FILE:
+        return "horizonrev_trl_policy.pt found but not loadable (install torch/transformers/trl)"
+    return "none (Trained falls back to heuristic)"
+
+
 def _pick_action(agent_type: str, obs: np.ndarray, rng: np.random.Generator) -> int:
     if agent_type == "Random":
         return int(rng.integers(0, 8))
     if agent_type == "Heuristic":
         return heuristic_action(obs)
-    if agent_type == "Trained" and TRAINED_WEIGHTS is not None:
-        logits = obs @ TRAINED_WEIGHTS
-        return int(np.argmax(logits))
+    if agent_type == "Trained":
+        if TRAINED_WEIGHTS is not None:
+            logits = obs @ TRAINED_WEIGHTS
+            return int(np.argmax(logits))
+        if TRAINED_TRL_POLICY is not None:
+            action = TRAINED_TRL_POLICY.pick_action(obs)
+            if 0 <= action <= 7:
+                return int(action)
     return heuristic_action(obs)
 
 
@@ -109,7 +189,7 @@ def _reset(state: AppState, reward_mode: str):
     state.obs = state.env.reset(seed=123)
     state.done = False
     state.reward_mode = reward_mode
-    state.logs = ["Environment reset."]
+    state.logs = ["Environment reset.", f"Trained backend: {_trained_backend_status()}"]
     state.history = {"month": [], "arr": [], "churn": [], "reward": []}
     return state, _make_figure(state.history), "\n".join(state.logs), "No step yet."
 
