@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Dict, List
 
@@ -21,11 +22,23 @@ class AppState:
     obs: np.ndarray | None = None
     done: bool = False
     logs: List[str] = field(default_factory=list)
-    history: Dict[str, List[float]] = field(default_factory=lambda: {"month": [], "arr": [], "churn": [], "reward": []})
+    history: Dict[str, List[float]] = field(
+        default_factory=lambda: {
+            "month": [],
+            "arr": [],
+            "conversion": [],
+            "churn": [],
+            "reward": [],
+            "cumulative_reward": [],
+        }
+    )
     reward_mode: str = "capped"
 
 
 ACTION_TOKENS = [f"<A{i}>" for i in range(8)]
+DEFAULT_TRL_MODEL_NAME = "sshleifer/tiny-gpt2"
+DEFAULT_TRL_POLICY_PATH = Path("horizonrev_trl_policy.pt")
+POLICY_METADATA_CANDIDATES = [Path("artifacts/policy_metadata.json"), Path("policy_metadata.json")]
 
 
 def _obs_to_text(obs: np.ndarray) -> str:
@@ -60,6 +73,29 @@ class _TrlPolicy:
         return _decode_action(generated)
 
 
+def _load_policy_metadata() -> dict:
+    for path in POLICY_METADATA_CANDIDATES:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+            if isinstance(data, dict):
+                data["_metadata_path"] = str(path)
+                return data
+        except Exception:
+            continue
+    return {}
+
+
+def _resolve_policy_path(metadata: dict) -> Path:
+    configured = metadata.get("policy_path")
+    if isinstance(configured, str) and configured.strip():
+        configured_path = Path(configured)
+        if configured_path.exists():
+            return configured_path
+    return DEFAULT_TRL_POLICY_PATH
+
+
 def _maybe_load_trained_weights():
     weights_path = Path("trained_policy.npy")
     if not weights_path.exists():
@@ -72,13 +108,16 @@ def _maybe_load_trained_weights():
 
 TRAINED_WEIGHTS = _maybe_load_trained_weights()
 TRL_POLICY_LOAD_ERROR: str | None = None
+POLICY_METADATA = _load_policy_metadata()
+TRL_POLICY_PATH = _resolve_policy_path(POLICY_METADATA)
+TRL_MODEL_NAME = str(POLICY_METADATA.get("model_name", DEFAULT_TRL_MODEL_NAME))
 
 
 def _maybe_load_trl_policy():
     global TRL_POLICY_LOAD_ERROR
-    pt_path = Path("horizonrev_trl_policy.pt")
+    pt_path = TRL_POLICY_PATH
     if not pt_path.exists():
-        TRL_POLICY_LOAD_ERROR = "horizonrev_trl_policy.pt not found"
+        TRL_POLICY_LOAD_ERROR = f"{pt_path} not found"
         return None
     try:
         import torch
@@ -88,7 +127,7 @@ def _maybe_load_trl_policy():
         return None
 
     try:
-        model_name = "sshleifer/tiny-gpt2"
+        model_name = TRL_MODEL_NAME
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -106,17 +145,17 @@ def _maybe_load_trl_policy():
 
 
 TRAINED_TRL_POLICY = _maybe_load_trl_policy()
-HAS_TRL_PT_FILE = Path("horizonrev_trl_policy.pt").exists()
+HAS_TRL_PT_FILE = TRL_POLICY_PATH.exists()
 
 
 def _trained_backend_status() -> str:
     if TRAINED_WEIGHTS is not None:
         return "trained_policy.npy"
     if TRAINED_TRL_POLICY is not None:
-        return "horizonrev_trl_policy.pt"
+        return f"{TRL_POLICY_PATH} (model={TRL_MODEL_NAME})"
     if HAS_TRL_PT_FILE:
         detail = TRL_POLICY_LOAD_ERROR or "unknown error"
-        return f"horizonrev_trl_policy.pt found but not loadable: {detail}"
+        return f"{TRL_POLICY_PATH} found but not loadable (model={TRL_MODEL_NAME}): {detail}"
     return "none (Trained falls back to heuristic)"
 
 
@@ -156,7 +195,8 @@ def _heuristic_report(obs: np.ndarray) -> str:
 
 
 def _make_figure(history: Dict[str, List[float]]):
-    fig, axes = plt.subplots(1, 3, figsize=(12, 3.5))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 6.5))
+    axes = axes.flatten()
     months = history["month"] or [0]
     axes[0].plot(months, history["arr"] or [0.0], marker="o")
     axes[0].set_title("ARR")
@@ -165,8 +205,11 @@ def _make_figure(history: Dict[str, List[float]]):
     axes[1].set_title("Churn")
     axes[1].set_xlabel("Month")
     axes[2].plot(months, history["reward"] or [0.0], marker="o", color="tab:green")
-    axes[2].set_title("Reward")
+    axes[2].set_title("Step Reward")
     axes[2].set_xlabel("Month")
+    axes[3].plot(months, history["cumulative_reward"] or [0.0], marker="o", color="tab:purple")
+    axes[3].set_title("Cumulative Reward")
+    axes[3].set_xlabel("Month")
     fig.tight_layout()
     return fig
 
@@ -197,7 +240,7 @@ def _reset(state: AppState, reward_mode: str):
     state.done = False
     state.reward_mode = reward_mode
     state.logs = ["Environment reset.", f"Trained backend: {_trained_backend_status()}"]
-    state.history = {"month": [], "arr": [], "churn": [], "reward": []}
+    state.history = {"month": [], "arr": [], "conversion": [], "churn": [], "reward": [], "cumulative_reward": []}
     return state, _make_figure(state.history), "\n".join(state.logs), "No step yet."
 
 
@@ -224,8 +267,11 @@ def _step(agent_type: str, reward_mode: str, report_text: str, state: AppState):
     state.done = done
     state.history["month"].append(info["month"])
     state.history["arr"].append(info["arr"])
+    state.history["conversion"].append(info["conversion"])
     state.history["churn"].append(info["churn"])
     state.history["reward"].append(reward)
+    running_total = reward if not state.history["cumulative_reward"] else state.history["cumulative_reward"][-1] + reward
+    state.history["cumulative_reward"].append(float(running_total))
 
     state.logs.append(format_step_log(info))
     if info["drift_event"]:
@@ -252,7 +298,55 @@ def _run_episode(agent_type: str, reward_mode: str, report_text: str, state: App
         state, _, _, _ = _reset(state, reward_mode)
     while not state.done:
         state, _, _, _ = _step(agent_type, reward_mode, report_text, state)
+    final_total = state.history["cumulative_reward"][-1] if state.history["cumulative_reward"] else 0.0
+    state.logs.append(f"Episode complete. Final cumulative reward={final_total:.3f}")
     return state, _make_figure(state.history), "\n".join(state.logs), "Episode complete."
+
+
+def _report_for_style(obs: np.ndarray, report_style: str) -> str:
+    if report_style == "structured":
+        return _heuristic_report(obs)
+    return "Action selected."
+
+
+def _score_stats(scores: List[float]) -> dict:
+    arr = np.asarray(scores, dtype=np.float64)
+    if arr.size == 0:
+        return {"mean": 0.0, "std": 0.0, "ci95": 0.0, "n": 0}
+    std = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
+    ci95 = 1.96 * std / np.sqrt(arr.size) if arr.size > 1 else 0.0
+    return {"mean": float(np.mean(arr)), "std": std, "ci95": float(ci95), "n": int(arr.size)}
+
+
+def _evaluate_agent_scores(
+    agent_type: str,
+    reward_mode: str,
+    report_style: str,
+    seeds: List[int],
+    scenario: str,
+) -> List[float]:
+    scenario_map = {
+        "base_case": HorizonRevConfig.base_case,
+        "pessimistic": HorizonRevConfig.pessimistic,
+        "macro_downturn": HorizonRevConfig.macro_downturn,
+    }
+    cfg_factory = scenario_map[scenario]
+    rewards: List[float] = []
+    for seed in seeds:
+        config = cfg_factory()
+        config = HorizonRevConfig(**{**config.__dict__, "reward_mode": reward_mode})
+        env = HorizonRevEnv(config)
+        obs = env.reset(seed=seed)
+        done = False
+        total = 0.0
+        rng = np.random.default_rng(seed)
+        while not done:
+            action = _pick_action(agent_type, obs, rng)
+            env.submit_report(_report_for_style(obs, report_style))
+            obs, reward, done, _ = env.step(action)
+            total += reward
+        rewards.append(float(total))
+    return rewards
 
 
 def _evaluate_agent(agent_type: str, reward_mode: str, report_style: str, n_episodes: int = 20) -> float:
@@ -267,10 +361,7 @@ def _evaluate_agent(agent_type: str, reward_mode: str, report_style: str, n_epis
         rng = np.random.default_rng(ep)
         while not done:
             action = _pick_action(agent_type, obs, rng)
-            if report_style == "structured":
-                env.submit_report(_heuristic_report(obs))
-            else:
-                env.submit_report("Action selected.")
+            env.submit_report(_report_for_style(obs, report_style))
             obs, reward, done, _ = env.step(action)
             total += reward
         rewards.append(total)
@@ -278,19 +369,53 @@ def _evaluate_agent(agent_type: str, reward_mode: str, report_style: str, n_epis
 
 
 def _compare(agent_type: str, reward_mode: str, state: AppState):
-    baseline = _evaluate_agent("Random", reward_mode=reward_mode, report_style="minimal", n_episodes=20)
-    contender = _evaluate_agent(
-        agent_type if agent_type != "Random" else "Heuristic",
-        reward_mode=reward_mode,
-        report_style="structured",
-        n_episodes=20,
-    )
+    contender_name = agent_type if agent_type != "Random" else "Heuristic"
+    eval_seeds = list(range(1000, 1100))
+    scenarios = ["base_case", "pessimistic", "macro_downturn"]
+    report_style = "structured"
     lines = [
+        "=== Credible evaluation (unseen seeds) ===",
         f"Reward mode: {reward_mode}",
-        f"Random avg reward (20 eps): {baseline:.3f}",
-        f"{agent_type if agent_type != 'Random' else 'Heuristic'} avg reward (20 eps, structured report): {contender:.3f}",
-        f"Improvement: {contender - baseline:+.3f}",
+        f"Report style (all agents): {report_style}",
+        f"Seeds: {eval_seeds[0]}..{eval_seeds[-1]} (n={len(eval_seeds)})",
     ]
+    overall_random = []
+    overall_contender = []
+    for scenario in scenarios:
+        random_scores = _evaluate_agent_scores(
+            "Random", reward_mode=reward_mode, report_style=report_style, seeds=eval_seeds, scenario=scenario
+        )
+        contender_scores = _evaluate_agent_scores(
+            contender_name, reward_mode=reward_mode, report_style=report_style, seeds=eval_seeds, scenario=scenario
+        )
+        overall_random.extend(random_scores)
+        overall_contender.extend(contender_scores)
+        random_stats = _score_stats(random_scores)
+        contender_stats = _score_stats(contender_scores)
+        delta_mean = contender_stats["mean"] - random_stats["mean"]
+        lines.append(
+            f"[{scenario}] Random mean={random_stats['mean']:.3f} +/-{random_stats['ci95']:.3f} "
+            f"(std={random_stats['std']:.3f})"
+        )
+        lines.append(
+            f"[{scenario}] {contender_name} mean={contender_stats['mean']:.3f} +/-{contender_stats['ci95']:.3f} "
+            f"(std={contender_stats['std']:.3f})"
+        )
+        lines.append(f"[{scenario}] Delta mean ({contender_name}-Random) = {delta_mean:+.3f}")
+
+    overall_random_stats = _score_stats(overall_random)
+    overall_contender_stats = _score_stats(overall_contender)
+    lines.append("---")
+    lines.append(
+        f"[overall] Random mean={overall_random_stats['mean']:.3f} +/-{overall_random_stats['ci95']:.3f} "
+        f"(std={overall_random_stats['std']:.3f}, n={overall_random_stats['n']})"
+    )
+    lines.append(
+        f"[overall] {contender_name} mean={overall_contender_stats['mean']:.3f} +/-{overall_contender_stats['ci95']:.3f} "
+        f"(std={overall_contender_stats['std']:.3f}, n={overall_contender_stats['n']})"
+    )
+    lines.append(f"[overall] Delta mean ({contender_name}-Random) = {overall_contender_stats['mean'] - overall_random_stats['mean']:+.3f}")
+
     state.logs.extend(lines)
     return state, _make_figure(state.history), "\n".join(state.logs), "See logs for compare output."
 

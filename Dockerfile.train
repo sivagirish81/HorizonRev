@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /workspace
+
+COPY requirements-train.txt /workspace/requirements-train.txt
+RUN pip install --upgrade pip && pip install -r /workspace/requirements-train.txt
+
+COPY . /workspace
+RUN pip install -e .
+
+CMD ["python", "scripts/train_ppo.py", "--train-episodes", "1200", "--eval-seed-count", "300", "--policy-out", "artifacts/horizonrev_trl_policy.pt", "--policy-metadata-out", "artifacts/policy_metadata.json", "--metrics-out", "artifacts/evaluation_metrics.json"]
