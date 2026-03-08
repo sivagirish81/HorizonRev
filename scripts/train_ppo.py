@@ -140,7 +140,11 @@ def train(
             q = tokenizer(obs_to_text(obs), return_tensors="pt").input_ids.squeeze(0).to(
                 ppo_trainer.model.pretrained_model.device
             )
+<<<<<<< HEAD
             q_attention_mask = torch.ones_like(q).unsqueeze(0)
+=======
+            q_attention_mask = torch.ones_like(q)
+>>>>>>> f443d0d (Updated generation to be called with attention_mask and pad_token_id)
             pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
             r = ppo_trainer.generate(
                 q,
