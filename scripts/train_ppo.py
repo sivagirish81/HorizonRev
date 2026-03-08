@@ -140,7 +140,7 @@ def train(
             q = tokenizer(obs_to_text(obs), return_tensors="pt").input_ids.squeeze(0).to(
                 ppo_trainer.model.pretrained_model.device
             )
-            q_attention_mask = torch.ones_like(q)
+            q_attention_mask = torch.ones_like(q).unsqueeze(0)
             pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
             r = ppo_trainer.generate(
                 q,
