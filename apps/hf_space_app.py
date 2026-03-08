@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 import json
 from pathlib import Path
 from typing import Dict, List
@@ -12,7 +13,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from horizonrev import HorizonRevConfig, HorizonRevEnv
-from horizonrev.dynamics.experiments import ACTION_NAMES, heuristic_action
+from horizonrev.dynamics.experiments import (
+    ACTION_NAMES,
+    DECREASE_DISCOUNT,
+    INCREASE_DISCOUNT,
+    LAUNCH_PRICING_AB,
+    SHIFT_SALES_ENT,
+    SHIFT_SALES_SMB,
+    STOP_PRICING_AB,
+    heuristic_action,
+)
 from horizonrev.rendering import format_step_log
 
 
@@ -43,6 +53,41 @@ MLP_POLICY_CANDIDATES = [Path("trained_policy_mlp.npz"), Path("artifacts/trained
 DEFAULT_EPISODE_LENGTH = HorizonRevConfig.default().episode_length
 PRIMITIVE_ACTION_COUNT = len(ACTION_NAMES)
 ACTION_COUNT = PRIMITIVE_ACTION_COUNT + PRIMITIVE_ACTION_COUNT ** HorizonRevConfig.default().actions_per_month
+
+
+def _decode_action_bundle(action: int, actions_per_month: int, primitive_actions: int) -> list[int]:
+    if action < primitive_actions or actions_per_month <= 1:
+        return [action]
+    bundle_index = action - primitive_actions
+    out: list[int] = []
+    for power in range(actions_per_month - 1, -1, -1):
+        base = primitive_actions**power
+        token = bundle_index // base
+        bundle_index %= base
+        out.append(int(token))
+    return out
+
+
+def _is_conflicting_bundle(bundle: list[int]) -> bool:
+    bundle_set = set(bundle)
+    if INCREASE_DISCOUNT in bundle_set and DECREASE_DISCOUNT in bundle_set:
+        return True
+    if LAUNCH_PRICING_AB in bundle_set and STOP_PRICING_AB in bundle_set:
+        return True
+    if SHIFT_SALES_SMB in bundle_set and SHIFT_SALES_ENT in bundle_set:
+        return True
+    return False
+
+
+@lru_cache(maxsize=8)
+def _valid_action_indices(max_actions: int) -> tuple[int, ...]:
+    valid: list[int] = []
+    actions_per_month = HorizonRevConfig.default().actions_per_month
+    for action in range(max_actions):
+        bundle = _decode_action_bundle(action, actions_per_month, PRIMITIVE_ACTION_COUNT)
+        if not _is_conflicting_bundle(bundle):
+            valid.append(action)
+    return tuple(valid)
 
 
 def _obs_to_text(obs: np.ndarray) -> str:
@@ -87,7 +132,12 @@ class _NumpyMlpPolicy:
     def pick_action(self, obs: np.ndarray) -> int:
         hidden = np.tanh(obs @ self.w1 + self.b1)
         logits = hidden @ self.w2 + self.b2
-        return int(np.argmax(logits))
+        max_actions = int(logits.shape[0])
+        valid = _valid_action_indices(max_actions)
+        if not valid:
+            return int(np.argmax(logits))
+        valid_arr = np.asarray(valid, dtype=np.int64)
+        return int(valid_arr[int(np.argmax(logits[valid_arr]))])
 
 
 def _load_policy_metadata() -> dict:

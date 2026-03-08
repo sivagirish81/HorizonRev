@@ -8,13 +8,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 
 import numpy as np
 
 from horizonrev import HorizonRevConfig, HorizonRevEnv
-from horizonrev.dynamics.experiments import ACTION_NAMES, heuristic_action
+from horizonrev.dynamics.experiments import (
+    ACTION_NAMES,
+    DECREASE_DISCOUNT,
+    INCREASE_DISCOUNT,
+    LAUNCH_PRICING_AB,
+    SHIFT_SALES_ENT,
+    SHIFT_SALES_SMB,
+    STOP_PRICING_AB,
+    heuristic_action,
+)
 
 
 BASE_CONFIG = HorizonRevConfig.default()
@@ -26,6 +36,73 @@ EPISODE_LENGTH = BASE_CONFIG.episode_length
 
 def config_for_reward_mode(cfg: HorizonRevConfig, reward_mode: str) -> HorizonRevConfig:
     return HorizonRevConfig(**{**cfg.__dict__, "reward_mode": reward_mode})
+
+
+def decode_action_bundle(action: int, actions_per_month: int, primitive_actions: int) -> List[int]:
+    if action < primitive_actions or actions_per_month <= 1:
+        return [action]
+    bundle_index = action - primitive_actions
+    out: List[int] = []
+    for power in range(actions_per_month - 1, -1, -1):
+        base = primitive_actions**power
+        token = bundle_index // base
+        bundle_index %= base
+        out.append(int(token))
+    return out
+
+
+def is_conflicting_bundle(bundle: List[int]) -> bool:
+    bundle_set = set(bundle)
+    if INCREASE_DISCOUNT in bundle_set and DECREASE_DISCOUNT in bundle_set:
+        return True
+    if LAUNCH_PRICING_AB in bundle_set and STOP_PRICING_AB in bundle_set:
+        return True
+    if SHIFT_SALES_SMB in bundle_set and SHIFT_SALES_ENT in bundle_set:
+        return True
+    return False
+
+
+def valid_action_indices(actions_per_month: int, primitive_actions: int, n_actions: int) -> List[int]:
+    valid = []
+    for action in range(n_actions):
+        bundle = decode_action_bundle(action, actions_per_month, primitive_actions)
+        if not is_conflicting_bundle(bundle):
+            valid.append(action)
+    return valid
+
+
+def state_bucket(obs: np.ndarray) -> Tuple[int, int, int]:
+    # Bucket by month/churn/discount so penalty is conditioned on current state.
+    month_bin = int(np.clip(round(float(obs[0]) * EPISODE_LENGTH), 1, EPISODE_LENGTH))
+    churn_bin = int(np.clip(np.floor(float(obs[3]) * 8.0), 0, 7))
+    discount_bin = int(np.clip(np.floor(float(obs[4]) * 6.0), 0, 5))
+    return month_bin, churn_bin, discount_bin
+
+
+def _make_arr_penalty_bias(
+    obs: np.ndarray,
+    n_actions: int,
+    arr_outcome_ema: Dict[Tuple[int, int, int, int], float],
+    arr_outcome_count: Dict[Tuple[int, int, int, int], int],
+    arr_penalty_strength: float,
+    arr_penalty_min_samples: int,
+    arr_penalty_scale: float,
+) -> np.ndarray:
+    if arr_penalty_strength <= 0.0:
+        return np.zeros(n_actions, dtype=np.float32)
+
+    month_bin, churn_bin, discount_bin = state_bucket(obs)
+    bias = np.zeros(n_actions, dtype=np.float32)
+    for action in range(n_actions):
+        key = (month_bin, churn_bin, discount_bin, action)
+        count = arr_outcome_count.get(key, 0)
+        if count < arr_penalty_min_samples:
+            continue
+        ema = arr_outcome_ema.get(key, 0.0)
+        if ema < 0.0:
+            severity = min(2.5, (-ema) / max(1e-6, arr_penalty_scale))
+            bias[action] = -arr_penalty_strength * severity
+    return bias
 
 
 def report_for_style(obs: np.ndarray, style: str) -> str:
@@ -73,14 +150,44 @@ class MlpPolicy:
         probs = self._softmax(logits)
         return hidden, probs
 
-    def sample_action(self, obs: np.ndarray, rng: np.random.Generator) -> tuple[int, np.ndarray, np.ndarray]:
+    def sample_action(
+        self,
+        obs: np.ndarray,
+        rng: np.random.Generator,
+        allowed_actions: List[int] | None = None,
+        action_logit_bias: np.ndarray | None = None,
+    ) -> tuple[int, np.ndarray, np.ndarray]:
         hidden, probs = self.forward(obs)
-        action = int(rng.choice(N_ACTIONS, p=probs))
+        sampling_probs = probs
+        if action_logit_bias is not None:
+            # softmax(logits + bias) is proportional to probs * exp(bias)
+            weighted = probs * np.exp(np.asarray(action_logit_bias, dtype=np.float64))
+            denom = float(np.sum(weighted))
+            if denom > 1e-12:
+                sampling_probs = (weighted / denom).astype(np.float32)
+        if allowed_actions:
+            idx = np.asarray(allowed_actions, dtype=np.int64)
+            restricted = sampling_probs[idx]
+            restricted = restricted / max(1e-12, float(np.sum(restricted)))
+            action = int(rng.choice(idx, p=restricted))
+        else:
+            action = int(rng.choice(N_ACTIONS, p=sampling_probs))
         return action, hidden, probs
 
-    def greedy_action(self, obs: np.ndarray) -> int:
+    def greedy_action(
+        self,
+        obs: np.ndarray,
+        allowed_actions: List[int] | None = None,
+        action_logit_bias: np.ndarray | None = None,
+    ) -> int:
         _, probs = self.forward(obs)
-        return int(np.argmax(probs))
+        scores = np.log(np.clip(probs, 1e-12, 1.0))
+        if action_logit_bias is not None:
+            scores = scores + np.asarray(action_logit_bias, dtype=np.float64)
+        if allowed_actions:
+            idx = np.asarray(allowed_actions, dtype=np.int64)
+            return int(idx[int(np.argmax(scores[idx]))])
+        return int(np.argmax(scores))
 
     def update_episode(
         self,
@@ -154,11 +261,20 @@ def train(
     entropy_coef_start: float,
     entropy_coef_end: float,
     max_grad_norm: float,
+    primitive_warmup_episodes: int,
+    arr_penalty_strength: float,
+    arr_penalty_min_samples: int,
+    arr_penalty_ema_alpha: float,
+    arr_penalty_scale: float,
     log_every: int,
 ) -> List[float]:
     rewards: List[float] = []
     train_seeds = list(range(train_seed_start, train_seed_start + train_seed_count))
     rng = np.random.default_rng(123)
+    primitive_only_actions = list(range(PRIMITIVE_ACTIONS))
+    full_valid_actions = valid_action_indices(BASE_CONFIG.actions_per_month, PRIMITIVE_ACTIONS, N_ACTIONS)
+    arr_outcome_ema: Dict[Tuple[int, int, int, int], float] = {}
+    arr_outcome_count: Dict[Tuple[int, int, int, int], int] = {}
 
     for ep in range(episodes):
         progress = float(ep) / float(max(1, episodes - 1))
@@ -176,11 +292,34 @@ def train(
         probs_list: List[np.ndarray] = []
         actions: List[int] = []
         step_rewards: List[float] = []
+        allowed_actions = primitive_only_actions if ep < primitive_warmup_episodes else full_valid_actions
 
         while not done:
-            action, hidden, probs = policy.sample_action(obs, rng)
+            arr_bias = _make_arr_penalty_bias(
+                obs=obs,
+                n_actions=N_ACTIONS,
+                arr_outcome_ema=arr_outcome_ema,
+                arr_outcome_count=arr_outcome_count,
+                arr_penalty_strength=arr_penalty_strength,
+                arr_penalty_min_samples=arr_penalty_min_samples,
+                arr_penalty_scale=arr_penalty_scale,
+            )
+            month_bin, churn_bin, discount_bin = state_bucket(obs)
+            prev_arr = float(env.state["arr"])
+            action, hidden, probs = policy.sample_action(
+                obs,
+                rng,
+                allowed_actions=allowed_actions,
+                action_logit_bias=arr_bias,
+            )
             report = report_for_style(obs, report_style)
-            obs_next, reward, done, _ = env.step(action, agent_report=report)
+            obs_next, reward, done, info = env.step(action, agent_report=report)
+            arr_delta = float(info["arr"]) - prev_arr
+            arr_delta_ratio = arr_delta / max(1.0, prev_arr)
+            key = (month_bin, churn_bin, discount_bin, int(action))
+            prev_ema = arr_outcome_ema.get(key, 0.0)
+            arr_outcome_ema[key] = (1.0 - arr_penalty_ema_alpha) * prev_ema + arr_penalty_ema_alpha * arr_delta_ratio
+            arr_outcome_count[key] = arr_outcome_count.get(key, 0) + 1
 
             obs_list.append(obs.astype(np.float32))
             hidden_list.append(hidden.astype(np.float32))
@@ -206,7 +345,8 @@ def train(
         if (ep + 1) % log_every == 0:
             print(
                 f"[train] ep={ep + 1}/{episodes} avg_reward_last_{log_every}={np.mean(rewards[-log_every:]):.3f} "
-                f"lr={lr:.5f} entropy_coef={entropy_coef:.5f}"
+                f"lr={lr:.5f} entropy_coef={entropy_coef:.5f} "
+                f"arr_penalty_strength={arr_penalty_strength:.2f}"
             )
     return rewards
 
@@ -220,6 +360,7 @@ def evaluate_agent(
     cfg_factory: Callable[[], HorizonRevConfig],
 ) -> List[float]:
     scores: List[float] = []
+    full_valid_actions = valid_action_indices(BASE_CONFIG.actions_per_month, PRIMITIVE_ACTIONS, N_ACTIONS)
     for seed in seeds:
         env = HorizonRevEnv(config_for_reward_mode(cfg_factory(), reward_mode))
         obs = env.reset(seed=seed)
@@ -228,11 +369,11 @@ def evaluate_agent(
         step_rng = np.random.default_rng(seed)
         while not done:
             if agent == "random":
-                action = int(step_rng.integers(0, N_ACTIONS))
+                action = int(step_rng.choice(np.asarray(full_valid_actions, dtype=np.int64)))
             elif agent == "heuristic":
                 action = heuristic_action(obs)
             else:
-                action = policy.greedy_action(obs)
+                action = policy.greedy_action(obs, allowed_actions=full_valid_actions)
             env.submit_report(report_for_style(obs, report_style))
             obs, reward, done, _ = env.step(action)
             total += float(reward)
@@ -280,6 +421,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--entropy-coef-start", type=float, default=0.02)
     parser.add_argument("--entropy-coef-end", type=float, default=0.003)
     parser.add_argument("--max-grad-norm", type=float, default=1.5)
+    parser.add_argument("--primitive-warmup-episodes", type=int, default=1500)
+    parser.add_argument("--arr-penalty-strength", type=float, default=1.2)
+    parser.add_argument("--arr-penalty-min-samples", type=int, default=8)
+    parser.add_argument("--arr-penalty-ema-alpha", type=float, default=0.15)
+    parser.add_argument("--arr-penalty-scale", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--policy-out", default="artifacts/trained_policy_mlp.npz")
@@ -295,7 +441,9 @@ def main() -> None:
         "schedule="
         f"lr({args.learning_rate}->{args.min_learning_rate}), "
         f"entropy({args.entropy_coef_start}->{args.entropy_coef_end}), "
-        f"hidden_dim={args.hidden_dim}, max_grad_norm={args.max_grad_norm}"
+        f"hidden_dim={args.hidden_dim}, max_grad_norm={args.max_grad_norm}, "
+        f"primitive_warmup_episodes={args.primitive_warmup_episodes}, "
+        f"arr_penalty_strength={args.arr_penalty_strength}"
     )
     policy = MlpPolicy(obs_dim=OBS_DIM, hidden_dim=args.hidden_dim, n_actions=N_ACTIONS, seed=args.seed)
     training_rewards = train(
@@ -311,6 +459,11 @@ def main() -> None:
         entropy_coef_start=args.entropy_coef_start,
         entropy_coef_end=args.entropy_coef_end,
         max_grad_norm=args.max_grad_norm,
+        primitive_warmup_episodes=args.primitive_warmup_episodes,
+        arr_penalty_strength=args.arr_penalty_strength,
+        arr_penalty_min_samples=args.arr_penalty_min_samples,
+        arr_penalty_ema_alpha=args.arr_penalty_ema_alpha,
+        arr_penalty_scale=args.arr_penalty_scale,
         log_every=args.log_every,
     )
 
@@ -328,6 +481,7 @@ def main() -> None:
         "actions_per_month": BASE_CONFIG.actions_per_month,
         "hidden_dim": args.hidden_dim,
         "n_actions": N_ACTIONS,
+        "valid_actions_count": len(valid_action_indices(BASE_CONFIG.actions_per_month, PRIMITIVE_ACTIONS, N_ACTIONS)),
         "reward_mode": args.reward_mode,
         "report_style": args.report_style,
     }
