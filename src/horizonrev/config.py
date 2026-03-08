@@ -8,7 +8,8 @@ from typing import Optional, Tuple
 
 @dataclass(frozen=True)
 class HorizonRevConfig:
-    episode_length: int = 6
+    episode_length: int = 12
+    actions_per_month: int = 2
     max_cohort_age: int = 24
     initial_arr: float = 120_000.0
     initial_customer_base: float = 800.0
@@ -65,9 +66,9 @@ class HorizonRevConfig:
     arpa_ent: float = 180.0
 
     drift_enabled: bool = True
-    drift_month: Optional[int] = 3
+    drift_month: Optional[int] = 6
     drift_randomize: bool = False
-    drift_month_range: Tuple[int, int] = (2, 4)
+    drift_month_range: Tuple[int, int] = (4, 8)
     drift_strength: float = 1.0
     drift_discount_multiplier_smb: float = 1.35
     drift_onboarding_multiplier_ent: float = 1.45

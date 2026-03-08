@@ -30,6 +30,8 @@ except Exception as exc:  # pragma: no cover - import guard for friendly failure
 
 ACTIONS = list(range(8))
 ACTION_TOKENS = [f"<A{i}>" for i in ACTIONS]
+DEFAULT_EPISODE_LENGTH = HorizonRevConfig.default().episode_length
+ACTION_SPACE_SIZE = len(ACTIONS) + len(ACTIONS) ** HorizonRevConfig.default().actions_per_month
 
 
 def obs_to_text(obs: np.ndarray) -> str:
@@ -54,7 +56,7 @@ def minimal_report(_obs: np.ndarray) -> str:
 
 
 def structured_report(obs: np.ndarray) -> str:
-    month = int(round(float(obs[0]) * 6))
+    month = int(round(float(obs[0]) * DEFAULT_EPISODE_LENGTH))
     return (
         f"Hypothesis: month {month} plan can improve ARR while controlling churn.\n"
         "Action: pick discount/onboarding/sales focus based on current metrics.\n"
@@ -140,7 +142,15 @@ def train(
             q = tokenizer(obs_to_text(obs), return_tensors="pt").input_ids.squeeze(0).to(
                 ppo_trainer.model.pretrained_model.device
             )
+<<<<<<< HEAD
+<<<<<<< HEAD
             q_attention_mask = torch.ones_like(q).unsqueeze(0)
+=======
+            q_attention_mask = torch.ones_like(q)
+>>>>>>> f443d0d (Updated generation to be called with attention_mask and pad_token_id)
+=======
+            q_attention_mask = torch.ones_like(q).unsqueeze(0)
+>>>>>>> 3f47486 (Fix tensor shape mismatch)
             pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
             r = ppo_trainer.generate(
                 q,
@@ -204,7 +214,7 @@ def evaluate_agent(
         step_rng = np.random.default_rng(seed)
         while not done:
             if agent == "random":
-                action = int(step_rng.integers(0, 8))
+                action = int(step_rng.integers(0, ACTION_SPACE_SIZE))
             elif agent == "heuristic":
                 action = heuristic_action(obs)
             else:
