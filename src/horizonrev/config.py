@@ -21,9 +21,9 @@ class HorizonRevConfig:
     base_conv_ent: float = 0.06
 
     theta0_smb: float = -2.2
-    theta_age_smb: float = -0.55
+    theta_age_smb: float = 0.55
     theta0_ent: float = -2.9
-    theta_age_ent: float = -0.42
+    theta_age_ent: float = 0.42
     hazard_max_base: float = 0.5
     hazard_max_final: float = 0.8
     onboarding_young_tau: float = 4.0
