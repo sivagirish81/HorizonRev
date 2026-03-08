@@ -94,9 +94,12 @@ def make_model_and_trainer(model_name: str, device: str) -> tuple:
     model.pretrained_model.resize_token_embeddings(len(tokenizer))
     model.to(device)
 
+    # Keep PPO batch_size aligned with HorizonRev episode length (6 by default).
+    # TRL step() expects exactly batch_size query/response/reward entries.
+    ppo_batch_size = HorizonRevConfig.base_case().episode_length
     ppo_trainer = PPOTrainer(
         config=PPOConfig(
-            batch_size=4,
+            batch_size=ppo_batch_size,
             mini_batch_size=2,
             learning_rate=1e-5,
             ppo_epochs=2,
@@ -149,7 +152,22 @@ def train(
             response_tensors.append(response_tokens)
             reward_tensors.append(torch.tensor(reward, dtype=torch.float32).to(ppo_trainer.model.pretrained_model.device))
 
-        ppo_trainer.step(query_tensors, response_tensors, reward_tensors)
+        batch_size = int(ppo_trainer.config.batch_size)
+        if len(query_tensors) < batch_size:
+            print(
+                f"[train] skipping PPO step at ep={ep + 1}: "
+                f"collected={len(query_tensors)} < batch_size={batch_size}"
+            )
+        else:
+            for start in range(0, len(query_tensors), batch_size):
+                end = start + batch_size
+                if end > len(query_tensors):
+                    break
+                ppo_trainer.step(
+                    query_tensors[start:end],
+                    response_tensors[start:end],
+                    reward_tensors[start:end],
+                )
         rewards.append(float(total))
         if (ep + 1) % log_every == 0:
             last_k = rewards[-log_every:]
