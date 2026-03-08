@@ -133,16 +133,20 @@ def train(
         reward_tensors = []
 
         while not done:
-            q = tokenizer(obs_to_text(obs), return_tensors="pt").input_ids.to(ppo_trainer.model.pretrained_model.device)
+            # TRL PPOTrainer.generate expects a 1D query tensor (seq_len), not batched input.
+            q = tokenizer(obs_to_text(obs), return_tensors="pt").input_ids.squeeze(0).to(
+                ppo_trainer.model.pretrained_model.device
+            )
             r = ppo_trainer.generate(q, max_new_tokens=4, do_sample=True, top_k=0, top_p=1.0)
-            generated = tokenizer.decode(r[0][q.shape[-1] :], skip_special_tokens=False)
+            response_tokens = r[0][q.shape[-1] :] if r.ndim == 2 else r[q.shape[-1] :]
+            generated = tokenizer.decode(response_tokens, skip_special_tokens=False)
             action = decode_action(generated, py_rng)
             report = report_for_style(obs, report_style)
             obs, reward, done, _ = env.step(action, agent_report=report)
             total += reward
 
-            query_tensors.append(q.squeeze(0))
-            response_tensors.append(r[0][q.shape[-1] :])
+            query_tensors.append(q)
+            response_tensors.append(response_tokens)
             reward_tensors.append(torch.tensor(reward, dtype=torch.float32).to(ppo_trainer.model.pretrained_model.device))
 
         ppo_trainer.step(query_tensors, response_tensors, reward_tensors)
