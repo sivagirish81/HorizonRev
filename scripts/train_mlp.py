@@ -339,6 +339,7 @@ def main() -> None:
     eval_seeds = list(range(args.eval_seed_start, args.eval_seed_start + args.eval_seed_count))
     metrics = {
         "config": vars(args),
+        "training_rewards": training_rewards,
         "training_reward_stats": stats(training_rewards),
         "evaluation": run_evaluation(
             policy=policy,
